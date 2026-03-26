@@ -36,6 +36,7 @@ from .package_tools import packages_tool, handle_packages
 # --- Phase 2: Auth sources ---
 from .github_tools import github_tool, handle_github
 from .reddit_tools import reddit_tool, handle_reddit
+from .so_tools import so_tool, handle_so
 
 # --- Phase 3: Composite CTO intelligence ---
 from .intelligence_tools import tech_pulse_tool, handle_tech_pulse
@@ -88,6 +89,7 @@ __all__ = [
     # Phase 2: Auth sources
     "github_tool", "handle_github",
     "reddit_tool", "handle_reddit",
+    "so_tool", "handle_so",
     # Phase 3: Composite CTO intelligence
     "tech_pulse_tool", "handle_tech_pulse",
     "evaluate_tool", "handle_evaluate",
