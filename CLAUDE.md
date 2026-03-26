@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Multi-source research intelligence server via MCP (stdio transport). Started as a fork of [blazickjp/arxiv-mcp-server](https://github.com/blazickjp/arxiv-mcp-server) — now expanded to **31 tools across 16 data sources** covering academic papers, developer communities, package registries, and composite "CTO intelligence" analysis.
+Multi-source research intelligence server via MCP (stdio transport). Started as a fork of [blazickjp/arxiv-mcp-server](https://github.com/blazickjp/arxiv-mcp-server) — now expanded to **35 tools across 18 data sources** covering academic papers, developer communities, package registries, and composite "CTO intelligence" analysis.
 
 **Primary consumer**: Claude Code on macOS, configured as a local stdio MCP server.
 **Secondary consumer**: Claude Desktop, any MCP-compatible client.
@@ -50,7 +50,7 @@ Multi-source research intelligence server via MCP (stdio transport). Started as 
 | `patent_search` | Lens.org | Patent cross-reference |
 | `export` | Local | BibTeX/markdown/JSON/CSV export |
 
-### Practitioner Sources (5)
+### Practitioner Sources (8)
 | Tool | Source | Auth Required |
 |------|--------|--------------|
 | `hn` | Hacker News (Algolia + Firebase) | None |
@@ -58,6 +58,9 @@ Multi-source research intelligence server via MCP (stdio transport). Started as 
 | `packages` | npm + PyPI + crates.io | None |
 | `github` | GitHub REST API | Optional `GITHUB_TOKEN` |
 | `reddit` | Reddit API | Optional `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` |
+| `stackoverflow` | Stack Overflow API | Optional `STACKOVERFLOW_KEY` |
+| `web` | Any URL (httpx + HTML parsing) | None |
+| `docs` | Context7 (live library docs) | Optional `CONTEXT7_API_KEY` |
 
 ### CTO Intelligence (4)
 | Tool | What it answers |
@@ -80,7 +83,7 @@ research-mcp-server/
 │   ├── server.py                        # MCP server, tool registration, backwards-compat aliases
 │   ├── config.py                        # Configuration (storage path, env vars)
 │   │
-│   ├── tools/                           # Tool implementations (31 tools)
+│   ├── tools/                           # Tool implementations (35 tools)
 │   │   ├── search.py                    # Unified search (keyword + structured)
 │   │   ├── semantic_search.py           # Embedding-based search
 │   │   ├── multi_search.py             # Cross-source search
@@ -107,11 +110,14 @@ research-mcp-server/
 │   │   ├── package_tools.py           # npm/PyPI/crates.io
 │   │   ├── github_tools.py            # GitHub
 │   │   ├── reddit_tools.py            # Reddit
+│   │   ├── so_tools.py               # Stack Overflow
+│   │   ├── web_tools.py              # Web scraper (any URL)
+│   │   ├── context7_tools.py         # Context7 (live library docs)
 │   │   ├── intelligence_tools.py      # Composite: tech_pulse, evaluate, sentiment, deep_research
 │   │   ├── suggest_tools.py           # Semantic tool discovery
 │   │   └── (backwards-compat files)   # advanced_query.py, kb_*.py, research_context.py, etc.
 │   │
-│   ├── clients/                        # External API clients (16 sources)
+│   ├── clients/                        # External API clients (18 sources)
 │   │   ├── arxiv_client.py            # arXiv structured queries
 │   │   ├── s2_client.py               # Semantic Scholar
 │   │   ├── openalex_client.py         # OpenAlex
@@ -126,7 +132,11 @@ research-mcp-server/
 │   │   ├── lobsters_client.py         # Lobsters
 │   │   ├── package_client.py          # npm + PyPI + crates.io
 │   │   ├── github_client.py           # GitHub REST API
-│   │   └── reddit_client.py           # Reddit (OAuth2 + public JSON fallback)
+│   │   ├── reddit_client.py           # Reddit (OAuth2 + public JSON fallback)
+│   │   ├── so_client.py              # Stack Overflow
+│   │   ├── web_client.py             # Web content fetcher (httpx + HTML)
+│   │   ├── context7_client.py        # Context7 documentation API
+│   │   └── sentiment_client.py       # Claude Haiku sentiment analysis
 │   │
 │   ├── store/                          # Local persistence
 │   │   ├── sqlite_store.py            # Paper metadata cache + embeddings
@@ -138,7 +148,7 @@ research-mcp-server/
 │   │
 │   ├── utils/
 │   │   ├── formatters.py              # Markdown/JSON formatting
-│   │   └── rate_limiter.py            # Token bucket limiters (13 sources)
+│   │   └── rate_limiter.py            # Token bucket limiters (15 sources)
 │   │
 │   ├── prompts/                        # MCP prompt templates
 │   └── security.py                     # Response sanitization
@@ -195,6 +205,9 @@ OPENALEX_EMAIL=...                      # Polite pool (100 req/s)
 CROSSREF_EMAIL=...                      # Polite pool
 LENS_API_TOKEN=...                      # Patent search
 HF_TOKEN=...                            # HuggingFace higher limits
+STACKOVERFLOW_KEY=...                   # SO higher limits (10k req/day)
+CONTEXT7_API_KEY=...                    # Context7 docs higher limits
+ANTHROPIC_API_KEY=...                   # Haiku sentiment analysis (~$0.001/call)
 ```
 
 ## Claude Code MCP Configuration
