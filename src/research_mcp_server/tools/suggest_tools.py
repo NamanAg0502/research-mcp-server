@@ -164,7 +164,7 @@ def _ensure_index() -> ToolIndex:
 
 suggest_tools_tool = types.Tool(
     name="help",
-    description="Find the right tool for your task. Describe what you need in natural language.",
+    description="Find the right tool — 22 more tools beyond what's listed. Describe what you need in natural language.",
     inputSchema={
         "type": "object",
         "properties": {
