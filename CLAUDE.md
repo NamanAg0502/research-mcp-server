@@ -144,16 +144,18 @@ research-mcp-server/
 │   │   ├── knowledge_graph.py         # KG storage
 │   │   ├── research_context.py        # Session tracking
 │   │   ├── research_memory.py         # Persistent memory (Engram pattern)
-│   │   └── research_history.py        # Audit trail
+│   │   ├── research_history.py        # Audit trail
+│   │   └── cache.py                  # TTL-based response cache
 │   │
 │   ├── utils/
 │   │   ├── formatters.py              # Markdown/JSON formatting
-│   │   └── rate_limiter.py            # Token bucket limiters (15 sources)
+│   │   ├── rate_limiter.py            # Token bucket limiters (15 sources)
+│   │   └── http_pool.py              # Singleton httpx connection pool
 │   │
 │   ├── prompts/                        # MCP prompt templates
 │   └── security.py                     # Response sanitization
 │
-├── tests/                              # 99 tests
+├── tests/                              # 177 tests
 ├── research/                           # Research docs and specs
 ├── CLAUDE.md                           # This file
 ├── pyproject.toml
@@ -255,8 +257,31 @@ async def handle_kb(arguments):
 ### Backwards Compatibility
 Old tool names (e.g., `search_papers`, `arxiv_advanced_query`, `kb_save`) are registered as aliases in `server.py._TOOL_HANDLERS` and still work. They route to the new consolidated handlers.
 
+### Progressive Disclosure
+`list_tools()` returns only **12 Tier 1 tools** (~3.5K tokens) instead of all 34 (~8K tokens). This saves 57% tokens per invocation. All 34 tools remain callable via `_TOOL_HANDLERS`. Tier 2 tools are discoverable via the `help` tool.
+
+**Tier 1** (always visible): `search`, `download_paper`, `read_paper`, `kb`, `citations`, `github`, `hn`, `reddit`, `tech_pulse`, `evaluate`, `deep_research`, `help`
+
+**Adding a new tool:** Add to `_TIER1_TOOLS` (if core) or `_TIER2_TOOLS` (if specialized) in `server.py`. Always add to `_TOOL_HANDLERS`.
+
+## Performance Architecture
+
+### Connection Pooling (`utils/http_pool.py`)
+Singleton `httpx.AsyncClient` pool — one client per base URL with TCP keep-alive and connection reuse. Use `http_pool.get()` / `http_pool.post()` instead of `async with httpx.AsyncClient() as client:`.
+
+### Response Cache (`store/cache.py`)
+TTL-based SQLite cache at the `call_tool()` dispatcher level. All cacheable tools get caching for free.
+- `trending`: 15 min TTL (HN/GitHub/HF trending)
+- `search`: 1 hour TTL (search results)
+- `stats`: 24 hour TTL (package stats, repo info)
+- `paper_metadata`: 7 day TTL (paper content, citations)
+- Mutating tools (`kb` save/annotate/remove, `memory`, `download_paper`) bypass cache
+
+### Rate Limiting (`utils/rate_limiter.py`)
+Every external API call goes through a per-source rate limiter. Add `await xxx_limiter.wait()` before every HTTP call.
+
 ## Constraints
-- **Async everywhere**: All tools must be `async def`. Use `httpx.AsyncClient`, `aiosqlite`.
+- **Async everywhere**: All tools must be `async def`. Use `http_pool` for HTTP calls, `aiosqlite` for DB.
 - **Graceful degradation**: If any source is down, return partial data with a note. Never crash.
 - **Actionable errors**: Suggest fixes (broaden query, check ID format, set env var).
 - **Rate limiting**: Every external API call must go through its rate limiter.
@@ -269,10 +294,13 @@ Old tool names (e.g., `search_papers`, `arxiv_advanced_query`, `kb_save`) are re
 - Normalize data in client layer, not tool layer
 
 ## Common Mistakes
-- Forgetting to add new tools to BOTH `list_tools()` AND `_TOOL_HANDLERS` in server.py
+- Forgetting to add new tools to `_TOOL_HANDLERS` AND `_TIER1_TOOLS` or `_TIER2_TOOLS` in server.py
 - Forgetting to export new tools in `tools/__init__.py`
 - Not respecting rate limits (every API call needs `await limiter.wait()`)
+- Using `async with httpx.AsyncClient()` instead of `http_pool.get()`/`http_pool.post()`
 - Using S2 paper ID without `ArXiv:` prefix
 - Not stripping version suffix (e.g., `v2`) from arXiv IDs before S2 lookup
 - Not testing with `python -c "from research_mcp_server.server import server"` after changes
 - Stale `tool_index.pkl` after renaming tools — delete from `~/.arxiv-papers/`
+- Forgetting to restart MCP server after adding new tools (Claude Code won't see them)
+- Tool descriptions over 150 chars — keep concise, lead with use-case
