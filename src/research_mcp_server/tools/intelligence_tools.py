@@ -345,6 +345,26 @@ async def handle_sentiment(arguments: Dict[str, Any]) -> List[types.TextContent]
         ),
     }
 
+    # LLM-based sentiment analysis (if available)
+    from ..clients.sentiment_client import SentimentAnalyzer
+
+    analyzer = SentimentAnalyzer()
+    if analyzer.available:
+        all_discussions = reddit_posts + [
+            {"title": s.get("title", ""), "body": "", "score": s.get("points", 0), "source": "hackernews"}
+            for s in hn_stories
+        ]
+        try:
+            llm_result = await analyzer.analyze(topic, all_discussions)
+            discussions["llm_analysis"] = llm_result
+        except Exception as e:
+            discussions["llm_analysis"] = {"error": str(e), "available": True}
+    else:
+        discussions["llm_analysis"] = {
+            "available": False,
+            "note": "Set ANTHROPIC_API_KEY for LLM-based sentiment analysis",
+        }
+
     if errors:
         discussions["errors"] = errors
 
