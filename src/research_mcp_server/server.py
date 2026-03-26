@@ -53,6 +53,7 @@ from .tools import packages_tool, handle_packages
 # --- Phase 2: Auth sources ---
 from .tools import github_tool, handle_github
 from .tools import reddit_tool, handle_reddit
+from .tools import so_tool, handle_so
 
 # --- Phase 3: Composite CTO intelligence ---
 from .tools import tech_pulse_tool, handle_tech_pulse
@@ -117,7 +118,7 @@ async def list_tools() -> List[types.Tool]:
         venue_lookup_tool, patent_search_tool, export_tool,
         # Practitioner Sources
         hn_tool, community_tool, packages_tool,
-        github_tool, reddit_tool,
+        github_tool, reddit_tool, so_tool,
         # CTO Intelligence
         tech_pulse_tool, evaluate_tool, sentiment_tool, deep_research_tool,
         # Meta
@@ -159,6 +160,7 @@ _TOOL_HANDLERS: Dict[str, Any] = {
     "packages": handle_packages,
     "github": handle_github,
     "reddit": handle_reddit,
+    "stackoverflow": handle_so,
     # CTO Intelligence
     "tech_pulse": handle_tech_pulse,
     "evaluate": handle_evaluate,

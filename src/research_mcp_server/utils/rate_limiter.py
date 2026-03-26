@@ -41,3 +41,4 @@ pypi_limiter = RateLimiter(calls_per_second=10)  # PyPI: generous limits
 crates_limiter = RateLimiter(calls_per_second=10)  # crates.io: generous limits
 github_limiter = RateLimiter(calls_per_second=5)  # GitHub: 5000 req/hr with token
 reddit_limiter = RateLimiter(calls_per_second=1)  # Reddit: 60 req/min OAuth
+so_limiter = RateLimiter(calls_per_second=5)  # Stack Overflow: generous with key

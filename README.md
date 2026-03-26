@@ -1,28 +1,93 @@
 # research-mcp-server
 
-> Enhanced fork of [blazickjp/arxiv-mcp-server](https://github.com/blazickjp/arxiv-mcp-server) — a personal research OS for Claude.
-
-An MCP server that turns Claude into a research assistant with persistent memory. Search arXiv, build a personal knowledge base, track citations, analyze trends, and never lose a research finding again.
+Multi-source research intelligence server for Claude via MCP.
 
 ## What It Does
 
-**21 MCP tools** organized in 4 layers:
+Turns Claude into a research-aware technical advisor by combining academic papers, developer communities, package registries, and GitHub into a unified research interface. Ask a question, get answers synthesized across 17 data sources -- from arXiv papers to Hacker News discussions to npm download stats.
 
-| Layer | Tools | Purpose |
-|-------|-------|---------|
-| **Core** | `search_papers`, `download_paper`, `list_papers`, `read_paper` | Upstream arXiv search and PDF reading |
-| **Intelligence** | `arxiv_advanced_query`, `arxiv_semantic_search`, `arxiv_compare_papers`, `arxiv_citation_graph`, `arxiv_citation_context`, `arxiv_research_lineage`, `arxiv_trend_analysis`, `arxiv_research_digest`, `arxiv_export`, `read_paper_chunks` | Semantic search, citation analysis, trend tracking, structured digests with gap analysis |
-| **Knowledge Base** | `kb_save`, `kb_search`, `kb_list`, `kb_annotate`, `kb_remove` | Persistent paper storage with tags, collections, notes, reading status, and local vector search |
-| **Meta** | `kg_query`, `research_context` | Knowledge graph traversal, research session tracking |
+31 tools organized across 8 categories, all accessible through natural language in Claude Code or Claude Desktop.
 
-**Plus a web UI** at `/web` for browsing your knowledge base in a browser.
+## Tools
+
+### Search and Discovery (3)
+
+| Tool | Description |
+|------|-------------|
+| `search` | Search arXiv papers with structured query building, date filters, and category constraints |
+| `semantic_search` | Embedding-based similarity search across your downloaded papers |
+| `cross_search` | Search multiple academic sources simultaneously (arXiv, Semantic Scholar, OpenAlex, CrossRef) |
+
+### Paper Management (4)
+
+| Tool | Description |
+|------|-------------|
+| `download_paper` | Download and store arXiv papers locally as PDF |
+| `list_papers` | List all downloaded papers with metadata |
+| `read_paper` | Read full text content of a downloaded paper |
+| `read_paper_chunks` | Read papers in paginated chunks for large documents |
+
+### Analysis (5)
+
+| Tool | Description |
+|------|-------------|
+| `citations` | Citation graph traversal via Semantic Scholar -- who cites what |
+| `lineage` | Trace a paper's research lineage: influences and descendants |
+| `compare` | Side-by-side comparison of multiple papers |
+| `trends` | Publication trend analysis over time for a research topic |
+| `digest` | Generate structured research digests with gap analysis |
+
+### Knowledge and Memory (3)
+
+| Tool | Description |
+|------|-------------|
+| `kb` | Personal knowledge base: save, search, tag, annotate, and organize papers into collections |
+| `kg_query` | Query the auto-built knowledge graph of concepts, methods, and datasets |
+| `memory` | Persistent research memory: sessions, open questions, findings |
+
+### Academic Sources (6)
+
+| Tool | Description |
+|------|-------------|
+| `hf_trending` | Trending papers and models from HuggingFace |
+| `benchmarks` | Search Papers With Code for SOTA results and benchmarks |
+| `model_benchmarks` | ML model benchmarks from Epoch AI |
+| `venue_lookup` | Venue and publication metadata via DBLP |
+| `patent_search` | Patent search via Lens.org |
+| `export` | Export papers as BibTeX, markdown, or JSON |
+
+### Practitioner Sources (6)
+
+| Tool | Description |
+|------|-------------|
+| `hn` | Search and browse Hacker News stories and discussions |
+| `community` | Developer content from Dev.to and Lobsters |
+| `packages` | Package stats and comparison across npm, PyPI, and crates.io |
+| `github` | GitHub repository search, trending repos, and repo details |
+| `reddit` | Search and browse Reddit developer communities |
+| `stackoverflow` | Search Stack Overflow questions and answers |
+
+### CTO Intelligence (4)
+
+| Tool | Description |
+|------|-------------|
+| `tech_pulse` | Aggregated view of what is trending across all practitioner sources |
+| `evaluate` | Technology comparison with data from papers, packages, GitHub, and community sentiment |
+| `sentiment` | Developer sentiment analysis for a technology across communities |
+| `deep_research` | Multi-source deep dive on any technical topic |
+
+### Meta (1)
+
+| Tool | Description |
+|------|-------------|
+| `help` | Suggests relevant tools based on your query |
 
 ## Quick Start
 
 ### Prerequisites
+
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
-- Claude Code or Claude Desktop
 
 ### Install
 
@@ -33,14 +98,22 @@ uv venv && source .venv/bin/activate
 uv pip install -e ".[test]"
 ```
 
-### Configure Claude Code
+### Run
+
+```bash
+uv run research-mcp-server
+```
+
+## MCP Configuration
+
+### Claude Code
 
 Add to `~/.claude.json` under `mcpServers`:
 
 ```json
 {
   "mcpServers": {
-    "arxiv": {
+    "research": {
       "type": "stdio",
       "command": "uv",
       "args": [
@@ -48,6 +121,7 @@ Add to `~/.claude.json` under `mcpServers`:
         "run", "research-mcp-server"
       ],
       "env": {
+        "GITHUB_TOKEN": "",
         "SEMANTIC_SCHOLAR_API_KEY": ""
       }
     }
@@ -55,14 +129,14 @@ Add to `~/.claude.json` under `mcpServers`:
 }
 ```
 
-### Configure Claude Desktop
+### Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "arxiv": {
+    "research": {
       "command": "uv",
       "args": [
         "--directory", "/path/to/arxiv-mcp-server",
@@ -73,95 +147,75 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-### Run the Web UI
+## Data Sources
 
-```bash
-cd web
-bun install
-bun dev
-# Open http://localhost:3000
-```
+| Source | API | Auth | Provides |
+|--------|-----|------|----------|
+| arXiv | export.arxiv.org | None | Paper search, metadata, full-text PDFs |
+| Semantic Scholar | api.semanticscholar.org | Optional key | Citations, references, batch paper lookup |
+| OpenAlex | api.openalex.org | Optional email | Cross-disciplinary paper metadata |
+| CrossRef | api.crossref.org | Optional email | DOI resolution, citation metadata |
+| HuggingFace | huggingface.co/api | Optional token | Trending papers, models, datasets |
+| Papers With Code | paperswithcode.com/api | None | SOTA benchmarks, code implementations |
+| Epoch AI | epoch.ai | None | ML model benchmarks, notable AI models |
+| DBLP | dblp.org | None | Venue metadata, publication records |
+| Lens.org | api.lens.org | Required token | Patent search, scholarly-patent links |
+| Hacker News | hn.algolia.com | None | Tech discussions, developer sentiment |
+| Dev.to | dev.to/api | None | Developer articles, tutorials |
+| Lobsters | lobste.rs | None | High-signal developer link aggregation |
+| npm | registry.npmjs.org | None | Package stats, versions, downloads |
+| PyPI | pypi.org/pypi | None | Python package metadata |
+| crates.io | crates.io/api | None | Rust package metadata |
+| GitHub | api.github.com | Optional token | Repository search, trending, stars |
+| Reddit | oauth.reddit.com | Optional OAuth | Developer subreddit discussions |
 
-## Example Queries
+## Environment Variables
 
-Once configured, ask Claude:
+All environment variables are optional. The server works with zero configuration, but API keys unlock higher rate limits and additional sources.
 
-```
-# Discovery
-Search arXiv for papers on "retrieval augmented generation" from the last 3 months
-Find papers by Ashish Vaswani on attention mechanisms
+| Variable | Purpose |
+|----------|---------|
+| `SEMANTIC_SCHOLAR_API_KEY` | Higher S2 rate limits (free at [semanticscholar.org](https://www.semanticscholar.org/product/api)) |
+| `GITHUB_TOKEN` | GitHub API: 5000 req/hr vs 60 req/hr unauthenticated |
+| `HF_TOKEN` | HuggingFace API: higher rate limits |
+| `LENS_API_TOKEN` | Required for patent search via Lens.org |
+| `REDDIT_CLIENT_ID` | Reddit OAuth2 access (paired with secret) |
+| `REDDIT_CLIENT_SECRET` | Reddit OAuth2 access (paired with client ID) |
+| `OPENALEX_EMAIL` | Polite pool access for OpenAlex (faster responses) |
+| `CROSSREF_EMAIL` | Polite pool access for CrossRef (faster responses) |
+| `STACKOVERFLOW_KEY` | Stack Overflow API: higher rate limits |
 
-# Deep Analysis
-Show me the citation context for paper 1706.03762
-Trace the research lineage of BERT — what influenced it and what it spawned
-Compare papers 1706.03762, 1810.04805, and 2005.14165
+## CTO Intelligence Examples
 
-# Knowledge Base
-Save paper 2401.12345 to my KB with tags "RAG" and "retrieval"
-What's in my knowledge base about transformers?
-List my unread papers in the "foundational-papers" collection
+The composite intelligence tools orchestrate queries across multiple sources to answer high-level questions.
 
-# Research Sessions
-Start a research session called "MSME Fintech Landscape"
-Add open question: "How does OCEN handle credit risk scoring?"
-Summarize my current research session
-
-# Digests & Trends
-Generate a research digest on "LLM agents" from the last 2 weeks
-What's trending in retrieval augmented generation this year?
-
-# Knowledge Graph
-What methods appear in my saved papers?
-Query my knowledge graph for papers using attention on NER datasets
-
-# Export
-Export my foundational-papers collection as BibTeX
-```
-
-## Architecture
+**"What's trending this week?"**
 
 ```
-research-mcp-server/
-├── src/research_mcp_server/
-│   ├── server.py              # MCP server with auto-logging
-│   ├── tools/                 # 21 tool implementations
-│   ├── clients/               # arXiv + Semantic Scholar API clients
-│   ├── store/                 # SQLite stores (KB, KG, history, sessions)
-│   └── utils/                 # Rate limiters, formatters
-├── web/                       # Next.js web UI
-│   ├── src/app/               # Pages: dashboard, papers, search, history
-│   └── src/lib/db.ts          # Direct SQLite access (same DB as MCP)
-└── tests/                     # 71 tests, 72% coverage
+Use tech_pulse to see what developers are talking about right now.
+Aggregates Hacker News, Reddit, GitHub trending, Dev.to, and HuggingFace.
 ```
 
-### Data Storage
+**"Drizzle vs Prisma?"**
 
-Everything is local SQLite at `~/.arxiv-mcp-server/papers/`:
+```
+Use evaluate to compare technologies with data from npm downloads,
+GitHub stars, Stack Overflow activity, community sentiment, and papers.
+```
 
-| File | Purpose |
-|------|---------|
-| `knowledge_base.db` | Papers, collections, tags, notes, embeddings |
-| `knowledge_graph.db` | Papers, concepts, methods, datasets as graph nodes |
-| `research_history.db` | Auto-logged tool calls (every query + full response) |
-| `research_context.db` | Research sessions, questions, findings |
-| `arxiv_cache.db` | Paper metadata cache, embedding cache, digests |
+**"What do devs think about Bun?"**
 
-### Key Design Decisions
+```
+Use sentiment to analyze developer opinion across Hacker News discussions,
+Reddit threads, Dev.to articles, and Stack Overflow questions.
+```
 
-- **Embeddings**: BAAI/bge-small-en-v1.5 (384-dim, CPU-friendly, 33MB)
-- **Hybrid search**: Reciprocal Rank Fusion combining keyword + semantic
-- **Auto-logging**: Every MCP tool call persisted with full response
-- **Knowledge graph**: Auto-extracted concepts/methods/datasets from papers
-- **Graceful degradation**: S2 rate limits don't break the server
+**"Everything about WebTransport"**
 
-## External APIs
-
-| API | Auth | Rate Limit | Used For |
-|-----|------|-----------|----------|
-| arXiv | None | 1 req/3s | Paper search, metadata, PDFs |
-| Semantic Scholar | Free key optional | 1000/s shared | Citations, references, batch lookup |
-
-Get a free S2 API key at [semanticscholar.org](https://www.semanticscholar.org/product/api) for reliable citation tools.
+```
+Use deep_research for a multi-source deep dive: papers, specs,
+community discussions, package ecosystem, and GitHub implementations.
+```
 
 ## Development
 
@@ -172,20 +226,10 @@ python -m pytest tests/ -v
 # Format
 black src/ tests/
 
-# Run MCP server locally
+# Run server locally with custom storage path
 uv run research-mcp-server --storage-path ~/.arxiv-papers
 ```
 
-## Web UI Stack
+## License
 
-- Next.js 16 (App Router)
-- Tailwind CSS 4 + shadcn/ui
-- better-sqlite3 (reads same SQLite as MCP server)
-- @remixicon/react for icons
-- Server components + server actions
-
-## Credits
-
-Enhanced fork of [blazickjp/arxiv-mcp-server](https://github.com/blazickjp/arxiv-mcp-server) (Apache-2.0).
-
-Intelligence layer, knowledge base, knowledge graph, web UI, and research tooling by [NamanAg0502](https://github.com/NamanAg0502) with Claude Code.
+Apache-2.0
