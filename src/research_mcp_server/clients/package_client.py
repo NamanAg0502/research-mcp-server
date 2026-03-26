@@ -15,6 +15,7 @@ from datetime import datetime
 
 import httpx
 
+from ..utils.http_pool import http_pool
 from ..utils.rate_limiter import npm_limiter, pypi_limiter, crates_limiter
 
 logger = logging.getLogger("research-mcp-server")
@@ -96,41 +97,38 @@ class PackageClient:
 
     async def _npm_request(self, path: str) -> Any:
         await npm_limiter.wait()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"https://registry.npmjs.org{path}")
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(f"https://registry.npmjs.org{path}", timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
 
     async def _npm_downloads(self, pkg: str) -> int | None:
         """Get npm monthly download count."""
         try:
             await npm_limiter.wait()
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"https://api.npmjs.org/downloads/point/last-month/{pkg}"
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("downloads")
+            resp = await http_pool.get(
+                f"https://api.npmjs.org/downloads/point/last-month/{pkg}",
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("downloads")
         except Exception:
             pass
         return None
 
     async def _pypi_request(self, pkg: str) -> Any:
         await pypi_limiter.wait()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"https://pypi.org/pypi/{pkg}/json")
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(f"https://pypi.org/pypi/{pkg}/json", timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
 
     async def _crates_request(self, path: str) -> Any:
         await crates_limiter.wait()
         headers = {"User-Agent": "research-mcp-server (async)"}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"https://crates.io/api/v1{path}", headers=headers
-            )
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(
+            f"https://crates.io/api/v1{path}", headers=headers, timeout=15.0
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def get_npm(self, name: str) -> dict[str, Any]:
         """Get npm package info + downloads."""
@@ -164,13 +162,13 @@ class PackageClient:
     ) -> list[dict[str, Any]]:
         """Search npm packages."""
         await npm_limiter.wait()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                "https://registry.npmjs.org/-/v1/search",
-                params={"text": query, "size": min(max_results, 20)},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        resp = await http_pool.get(
+            "https://registry.npmjs.org/-/v1/search",
+            params={"text": query, "size": min(max_results, 20)},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         results = []
         for obj in data.get("objects", []):
@@ -194,15 +192,15 @@ class PackageClient:
         # PyPI doesn't have a great search API. Use the simple JSON endpoint.
         # Fallback: search via warehouse API
         await pypi_limiter.wait()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                "https://pypi.org/search/",
-                params={"q": query},
-                headers={"Accept": "application/json"},
-            )
-            # PyPI search returns HTML, not JSON. Use a workaround.
-            # Return empty and suggest using package name directly.
-            return []  # PyPI has no public search API that returns JSON
+        resp = await http_pool.get(
+            "https://pypi.org/search/",
+            params={"q": query},
+            headers={"Accept": "application/json"},
+            timeout=15.0,
+        )
+        # PyPI search returns HTML, not JSON. Use a workaround.
+        # Return empty and suggest using package name directly.
+        return []  # PyPI has no public search API that returns JSON
 
     async def search_crates(
         self, query: str, max_results: int = 10

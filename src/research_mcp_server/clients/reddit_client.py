@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 import httpx
 
+from ..utils.http_pool import http_pool
 from ..utils.rate_limiter import reddit_limiter
 
 logger = logging.getLogger("research-mcp-server")
@@ -83,16 +84,16 @@ class RedditClient:
         if self._access_token:
             return self._access_token
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                REDDIT_TOKEN_URL,
-                data={"grant_type": "client_credentials"},
-                auth=(self._client_id, self._client_secret),
-                headers={"User-Agent": "research-mcp-server/1.0"},
-            )
-            resp.raise_for_status()
-            self._access_token = resp.json()["access_token"]
-            return self._access_token
+        resp = await http_pool.post(
+            REDDIT_TOKEN_URL,
+            data={"grant_type": "client_credentials"},
+            auth=(self._client_id, self._client_secret),
+            headers={"User-Agent": "research-mcp-server/1.0"},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        self._access_token = resp.json()["access_token"]
+        return self._access_token
 
     async def _request(self, path: str, params: dict | None = None) -> Any:
         """Make authenticated or public request."""
@@ -107,16 +108,15 @@ class RedditClient:
         else:
             url = f"{REDDIT_PUBLIC_URL}{path}.json"
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params or {}, headers=headers)
-            if resp.status_code == 401 and self._authenticated:
-                # Token expired, retry
-                self._access_token = None
-                token = await self._get_token()
-                headers["Authorization"] = f"Bearer {token}"
-                resp = await client.get(url, params=params or {}, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(url, params=params or {}, headers=headers, timeout=15.0)
+        if resp.status_code == 401 and self._authenticated:
+            # Token expired, retry
+            self._access_token = None
+            token = await self._get_token()
+            headers["Authorization"] = f"Bearer {token}"
+            resp = await http_pool.get(url, params=params or {}, headers=headers, timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
 
     async def search(
         self,

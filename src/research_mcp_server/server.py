@@ -75,6 +75,7 @@ from .prompts.handlers import list_prompts as handler_list_prompts
 from .prompts.handlers import get_prompt as handler_get_prompt
 from .security import sanitize_tool_response, check_response_size
 from .store.research_history import ResearchHistory
+from .store.cache import response_cache
 
 _history = ResearchHistory()
 
@@ -214,16 +215,93 @@ for _old_name, _new_name in _COMPAT_ALIASES.items():
         _TOOL_HANDLERS[_old_name] = _TOOL_HANDLERS[_new_name]
 
 
+# --- Cache configuration ---
+# Tools that NEVER cache (mutate state or are session-specific)
+_NO_CACHE_TOOLS = {
+    "download_paper", "kb", "memory", "kg_query", "help",
+    "kb_save", "kb_annotate", "kb_remove",
+    "research_context", "research_memory",
+}
+
+# TTL category per tool (default: "search")
+_TOOL_CACHE_TTL: Dict[str, str] = {
+    # Trending endpoints — stale after 15 min
+    "tech_pulse": "trending",
+    "hf_trending": "trending",
+    # Stats/metadata — stable for 24 hours
+    "packages": "stats",
+    "model_benchmarks": "stats",
+    "venue_lookup": "stats",
+    # Composite — cache for 30 min (default)
+    "evaluate": "default",
+    "sentiment": "default",
+    "deep_research": "default",
+    # Paper data — stable for 7 days
+    "read_paper": "paper_metadata",
+    "read_paper_chunks": "paper_metadata",
+    "list_papers": "paper_metadata",
+    "citations": "paper_metadata",
+    "lineage": "paper_metadata",
+    "export": "paper_metadata",
+}
+
+
+def _is_cacheable(name: str, arguments: Dict[str, Any]) -> bool:
+    """Determine if a tool call should be cached."""
+    if name in _NO_CACHE_TOOLS:
+        return False
+    # KB sub-actions: only search/list are cacheable
+    if name == "kb":
+        action = arguments.get("action", "")
+        return action in ("search", "list")
+    # HN/community/reddit trending actions are cacheable with short TTL
+    if name in ("hn", "community", "reddit", "stackoverflow"):
+        action = arguments.get("action", "")
+        return action in ("search", "trending", "tags")
+    # GitHub: all read actions are cacheable
+    if name == "github":
+        return arguments.get("action", "") != ""
+    return True
+
+
+def _get_ttl_category(name: str, arguments: Dict[str, Any]) -> str:
+    """Get the TTL category for a cacheable tool call."""
+    # Check tool-specific overrides
+    if name in _TOOL_CACHE_TTL:
+        return _TOOL_CACHE_TTL[name]
+    # Action-based TTL
+    action = arguments.get("action", "")
+    if action == "trending":
+        return "trending"
+    if action in ("stats", "repo", "tags"):
+        return "stats"
+    # Default: 1 hour search cache
+    return "search"
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
     """Handle tool calls for research functionality.
 
-    Every call is auto-logged to research_history.db for audit trail.
-    Supports backwards-compat aliases for old tool names.
+    Features:
+    - Response caching with TTL (15min trending → 7 days paper metadata)
+    - Auto-logging to research_history.db for audit trail
+    - Backwards-compat aliases for old tool names
     """
     logger.debug(f"Calling tool {name} with arguments {arguments}")
     start = time.monotonic()
     is_error = False
+
+    # --- Cache check ---
+    cacheable = _is_cacheable(name, arguments)
+    if cacheable:
+        try:
+            cached = await response_cache.get(name, arguments)
+            if cached is not None:
+                logger.info(f"Cache HIT for {name}")
+                return [types.TextContent(type="text", text=cached)]
+        except Exception as cache_err:
+            logger.warning(f"Cache read error: {cache_err}")
 
     try:
         handler = _TOOL_HANDLERS.get(name)
@@ -262,6 +340,15 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextCont
                     type="text",
                     text=sanitized[:500_000] + "\n\n[Response truncated — exceeded 500KB limit]",
                 )
+
+    # --- Cache store (only on success) ---
+    if cacheable and not is_error:
+        try:
+            response_text_for_cache = "\n".join(r.text for r in result)
+            ttl_cat = _get_ttl_category(name, arguments)
+            await response_cache.set(name, arguments, response_text_for_cache, ttl_category=ttl_cat)
+        except Exception as cache_err:
+            logger.warning(f"Cache write error: {cache_err}")
 
     # Auto-log to research history
     duration_ms = int((time.monotonic() - start) * 1000)

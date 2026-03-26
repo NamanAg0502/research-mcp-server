@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from ..utils.http_pool import http_pool
 from ..utils.rate_limiter import hn_limiter
 
 logger = logging.getLogger("research-mcp-server")
@@ -54,10 +55,9 @@ class HNClient:
 
     async def _request(self, base: str, path: str, params: dict | None = None) -> Any:
         await hn_limiter.wait()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{base}{path}", params=params or {})
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(f"{base}{path}", params=params or {}, timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
 
     async def search(
         self,

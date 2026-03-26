@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import httpx
 
+from ..utils.http_pool import http_pool
 from ..utils.rate_limiter import devto_limiter
 
 logger = logging.getLogger("research-mcp-server")
@@ -39,10 +40,9 @@ class DevtoClient:
 
     async def _request(self, path: str, params: dict | None = None) -> Any:
         await devto_limiter.wait()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{DEVTO_BASE}{path}", params=params or {})
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(f"{DEVTO_BASE}{path}", params=params or {}, timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
 
     async def search(
         self,

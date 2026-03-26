@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import httpx
 
+from ..utils.http_pool import http_pool
 from ..utils.rate_limiter import github_limiter
 
 logger = logging.getLogger("research-mcp-server")
@@ -71,14 +72,14 @@ class GitHubClient:
 
     async def _request(self, path: str, params: dict | None = None) -> Any:
         await github_limiter.wait()
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"{GITHUB_API}{path}",
-                params=params or {},
-                headers=self._headers,
-            )
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(
+            f"{GITHUB_API}{path}",
+            params=params or {},
+            headers=self._headers,
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def search_repos(
         self,
@@ -104,20 +105,20 @@ class GitHubClient:
         try:
             # Contributors count (use per_page=1 and check headers)
             await github_limiter.wait()
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{GITHUB_API}/repos/{owner_repo}/contributors",
-                    params={"per_page": 1, "anon": "true"},
-                    headers=self._headers,
-                )
-                # GitHub returns Link header with last page number
-                link = resp.headers.get("Link", "")
-                if 'rel="last"' in link:
-                    import re
-                    match = re.search(r'page=(\d+)>; rel="last"', link)
-                    result["contributors_count"] = int(match.group(1)) if match else len(resp.json())
-                else:
-                    result["contributors_count"] = len(resp.json()) if resp.status_code == 200 else None
+            resp = await http_pool.get(
+                f"{GITHUB_API}/repos/{owner_repo}/contributors",
+                params={"per_page": 1, "anon": "true"},
+                headers=self._headers,
+                timeout=10.0,
+            )
+            # GitHub returns Link header with last page number
+            link = resp.headers.get("Link", "")
+            if 'rel="last"' in link:
+                import re
+                match = re.search(r'page=(\d+)>; rel="last"', link)
+                result["contributors_count"] = int(match.group(1)) if match else len(resp.json())
+            else:
+                result["contributors_count"] = len(resp.json()) if resp.status_code == 200 else None
         except Exception:
             result["contributors_count"] = None
 

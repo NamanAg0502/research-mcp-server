@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import httpx
 
+from ..utils.http_pool import http_pool
 from ..utils.rate_limiter import so_limiter
 
 logger = logging.getLogger("research-mcp-server")
@@ -60,10 +61,9 @@ class SOClient:
     async def _request(self, path: str, params: dict | None = None) -> Any:
         await so_limiter.wait()
         merged = {**self._base_params(), **(params or {})}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{SO_API}{path}", params=merged)
-            resp.raise_for_status()
-            return resp.json()
+        resp = await http_pool.get(f"{SO_API}{path}", params=merged, timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
 
     async def search(
         self,
