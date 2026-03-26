@@ -139,7 +139,10 @@ class RedditClient:
             path = f"/r/{subreddit}/search"
             params["restrict_sr"] = "on"
         else:
-            path = "/search"
+            # Default to dev subreddits to avoid irrelevant results from all of Reddit
+            combined = "+".join(DEV_SUBREDDITS)
+            path = f"/r/{combined}/search"
+            params["restrict_sr"] = "on"
 
         data = await self._request(path, params)
 

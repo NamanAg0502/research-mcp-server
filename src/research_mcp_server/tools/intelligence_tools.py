@@ -51,6 +51,7 @@ async def handle_tech_pulse(arguments: Dict[str, Any]) -> List[types.TextContent
     from .hf_papers import handle_hf_trending
 
     topic = arguments.get("topic")
+    short_query = _simplify_query(topic) if topic else None
     max_per = arguments.get("max_per_source", 5)
     results: Dict[str, Any] = {}
     errors: List[str] = []
@@ -67,9 +68,9 @@ async def handle_tech_pulse(arguments: Dict[str, Any]) -> List[types.TextContent
     tasks = []
 
     # HN: search if topic, else trending
-    if topic:
+    if short_query:
         tasks.append(fetch_source("hackernews", handle_hn({
-            "action": "search", "query": topic, "max_results": max_per, "time_range": "week",
+            "action": "search", "query": short_query, "max_results": max_per, "time_range": "week",
         })))
     else:
         tasks.append(fetch_source("hackernews", handle_hn({
@@ -78,14 +79,14 @@ async def handle_tech_pulse(arguments: Dict[str, Any]) -> List[types.TextContent
 
     # GitHub: trending, optionally filtered
     gh_args: Dict[str, Any] = {"action": "trending", "max_results": max_per, "since": "weekly"}
-    if topic:
-        gh_args = {"action": "search", "query": topic, "max_results": max_per, "sort": "stars"}
+    if short_query:
+        gh_args = {"action": "search", "query": short_query, "max_results": max_per, "sort": "stars"}
     tasks.append(fetch_source("github", handle_github(gh_args)))
 
     # Dev.to + Lobsters
-    if topic:
+    if short_query:
         tasks.append(fetch_source("community", handle_community({
-            "action": "search", "query": topic, "max_results": max_per,
+            "action": "search", "query": short_query, "max_results": max_per,
         })))
     else:
         tasks.append(fetch_source("community", handle_community({
@@ -383,6 +384,22 @@ deep_research_tool = types.Tool(
 )
 
 
+def _simplify_query(topic: str, max_words: int = 5) -> str:
+    """Simplify a verbose topic into a short search query.
+
+    GitHub/HN/Reddit APIs work best with 2-5 word queries.
+    Long queries like "MCP server performance optimization connection pooling"
+    return zero results on these APIs.
+    """
+    # Remove common filler words
+    stopwords = {
+        "and", "or", "the", "a", "an", "in", "on", "for", "to", "of", "with",
+        "using", "via", "how", "what", "why", "best", "about", "between",
+    }
+    words = [w for w in topic.split() if w.lower() not in stopwords]
+    return " ".join(words[:max_words])
+
+
 async def handle_deep_research(arguments: Dict[str, Any]) -> List[types.TextContent]:
     """Comprehensive multi-source research."""
     from .search import handle_search
@@ -393,9 +410,10 @@ async def handle_deep_research(arguments: Dict[str, Any]) -> List[types.TextCont
     from .package_tools import handle_packages
 
     topic = arguments["topic"]
+    short_query = _simplify_query(topic)  # Simplified for APIs that choke on long queries
     max_per = arguments.get("max_per_source", 5)
     include_packages = arguments.get("include_packages", True)
-    results: Dict[str, Any] = {"topic": topic}
+    results: Dict[str, Any] = {"topic": topic, "search_query": short_query}
     errors: List[str] = []
 
     async def safe_call(name, coro):
@@ -407,27 +425,29 @@ async def handle_deep_research(arguments: Dict[str, Any]) -> List[types.TextCont
             return None
 
     # Run all sources in parallel
+    # arXiv gets the full topic (handles long queries well)
+    # GitHub/HN/Reddit/community get the simplified query
     tasks = {
         "arxiv": safe_call("arxiv", handle_search({
             "query": topic, "max_results": max_per, "sort_by": "relevance",
         })),
         "github": safe_call("github", handle_github({
-            "action": "search", "query": topic, "max_results": max_per,
+            "action": "search", "query": short_query, "max_results": max_per,
         })),
         "hackernews": safe_call("hackernews", handle_hn({
-            "action": "search", "query": topic, "max_results": max_per, "time_range": "year",
+            "action": "search", "query": short_query, "max_results": max_per, "time_range": "year",
         })),
         "reddit": safe_call("reddit", handle_reddit({
-            "action": "search", "query": topic, "max_results": max_per, "time_filter": "year",
+            "action": "search", "query": short_query, "max_results": max_per, "time_filter": "year",
         })),
         "community": safe_call("community", handle_community({
-            "action": "search", "query": topic, "max_results": max_per,
+            "action": "search", "query": short_query, "max_results": max_per,
         })),
     }
 
     if include_packages:
         tasks["packages_npm"] = safe_call("packages_npm", handle_packages({
-            "action": "search", "query": topic, "search_registry": "npm", "max_results": 3,
+            "action": "search", "query": short_query, "search_registry": "npm", "max_results": 3,
         }))
 
     # Execute all in parallel
