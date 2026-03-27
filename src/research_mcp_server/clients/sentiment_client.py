@@ -1,74 +1,51 @@
-"""LLM-based sentiment analysis using Claude Haiku.
+"""LLM-based sentiment analysis.
 
-Requires ANTHROPIC_API_KEY env var. Falls back gracefully when not available.
-Cost: ~$0.001 per analysis call (Haiku is very cheap).
+Uses Claude Code CLI (`claude -p`) if available — no API key needed, uses existing
+Claude Code OAuth auth. Falls back to ANTHROPIC_API_KEY direct API if CLI not found.
 """
 
+import asyncio
 import json
 import logging
 import os
-from typing import Any, Optional
+import shutil
+from typing import Any, Literal
 
-import httpx
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger("research-mcp-server")
 
-ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
+HAIKU_MODEL = "claude-haiku-4-6"
 
 
-class SentimentAnalyzer:
-    """LLM-based sentiment analysis using Claude Haiku."""
+class SentimentResult(BaseModel):
+    overall_sentiment: Literal["positive", "negative", "mixed", "neutral"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    key_praise: list[str]
+    key_concerns: list[str]
+    adoption_signal: Literal["growing", "stable", "declining", "emerging"]
+    summary: str
 
-    def __init__(self) -> None:
-        self._api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
-        self._available = bool(self._api_key)
-        if self._available:
-            logger.info("Sentiment analyzer initialized with Anthropic API key")
-        else:
-            logger.info("Sentiment analyzer unavailable (no ANTHROPIC_API_KEY)")
 
-    @property
-    def available(self) -> bool:
-        return self._available
+def _build_prompt(topic: str, discussions: list[dict[str, Any]]) -> str:
+    discussion_text = ""
+    for d in discussions[:15]:
+        title = d.get("title", "")
+        body = d.get("selftext", d.get("body", d.get("story_text", "")))
+        score = d.get("score", d.get("points", 0))
+        source = d.get("source", "unknown")
+        if body and len(body) > 200:
+            body = body[:200] + "..."
+        discussion_text += f"[{source}, score:{score}] {title}"
+        if body:
+            discussion_text += f"\n  {body}"
+        discussion_text += "\n\n"
 
-    async def analyze(
-        self,
-        topic: str,
-        discussions: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Analyze sentiment across discussion threads using Haiku.
-
-        Args:
-            topic: Technology/topic being analyzed.
-            discussions: List of dicts with 'title', 'body'/'selftext', 'score', 'source'.
-
-        Returns:
-            Structured sentiment analysis.
-        """
-        if not self._available:
-            return {"error": "ANTHROPIC_API_KEY not set", "available": False}
-
-        # Build discussion summary for the prompt (stay under ~2K tokens)
-        discussion_text = ""
-        for d in discussions[:15]:  # Cap at 15 threads
-            title = d.get("title", "")
-            body = d.get("selftext", d.get("body", d.get("story_text", "")))
-            score = d.get("score", d.get("points", 0))
-            source = d.get("source", "unknown")
-            # Truncate body
-            if body and len(body) > 200:
-                body = body[:200] + "..."
-            discussion_text += f"[{source}, score:{score}] {title}"
-            if body:
-                discussion_text += f"\n  {body}"
-            discussion_text += "\n\n"
-
-        prompt = f"""Analyze the community sentiment about "{topic}" based on these developer discussions:
+    return f"""Analyze the community sentiment about "{topic}" based on these developer discussions:
 
 {discussion_text}
 
-Respond in JSON format:
+Respond in JSON format only (no markdown, no explanation):
 {{
   "overall_sentiment": "positive" | "negative" | "mixed" | "neutral",
   "confidence": 0.0-1.0,
@@ -80,45 +57,93 @@ Respond in JSON format:
 
 Be specific and evidence-based. Only include points actually mentioned in the discussions."""
 
-        headers = {
-            "x-api-key": self._api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        payload = {
-            "model": HAIKU_MODEL,
-            "max_tokens": 500,
-            "messages": [{"role": "user", "content": prompt}],
-        }
 
+def _parse_response(text: str) -> dict[str, Any]:
+    """Parse JSON from LLM response, stripping markdown fences if present."""
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    return json.loads(text)
+
+
+class SentimentAnalyzer:
+    """LLM sentiment analysis — prefers Claude Code CLI, falls back to API key."""
+
+    def __init__(self) -> None:
+        self._api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+        self._cli = shutil.which("claude")
+        self._available = bool(self._cli) or bool(self._api_key)
+
+        if self._cli:
+            logger.info("Sentiment analyzer using Claude Code CLI")
+        elif self._api_key:
+            logger.info("Sentiment analyzer using Anthropic API key")
+        else:
+            logger.info("Sentiment analyzer unavailable (no claude CLI or ANTHROPIC_API_KEY)")
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    async def analyze(self, topic: str, discussions: list[dict[str, Any]]) -> dict[str, Any]:
+        """Analyze sentiment across discussion threads."""
+        if not self._available:
+            return {
+                "available": False,
+                "note": "Install Claude Code CLI (`npm i -g @anthropic-ai/claude-code`) or set ANTHROPIC_API_KEY",
+            }
+
+        prompt = _build_prompt(topic, discussions)
+
+        if self._cli:
+            return await self._analyze_via_cli(prompt)
+        return await self._analyze_via_api(prompt)
+
+    async def _analyze_via_cli(self, prompt: str) -> dict[str, Any]:
+        """Run sentiment analysis via `claude -p` subprocess."""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(ANTHROPIC_API, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
+            proc = await asyncio.create_subprocess_exec(
+                self._cli, "-p", prompt,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            text = stdout.decode().strip()
+            analysis = _parse_response(text)
+            analysis["model"] = "claude-code-cli"
+            analysis["available"] = True
+            return analysis
+        except asyncio.TimeoutError:
+            logger.error("Claude Code CLI timed out")
+            return {"error": "CLI timeout", "available": True}
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse CLI response as JSON: {text[:200]}")
+            return {"overall_sentiment": "unknown", "raw_response": text[:500], "available": True, "parse_error": True}
+        except Exception as e:
+            logger.error(f"CLI sentiment error: {e}")
+            return {"error": str(e), "available": True}
 
-            # Extract text from response
-            text = data.get("content", [{}])[0].get("text", "")
+    async def _analyze_via_api(self, prompt: str) -> dict[str, Any]:
+        """Run sentiment analysis via Anthropic SDK + Instructor for structured output."""
+        try:
+            import instructor
+            from anthropic import Anthropic
 
-            # Parse JSON from response (handle markdown code blocks)
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0].strip()
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0].strip()
-
-            analysis = json.loads(text)
+            client = instructor.from_anthropic(Anthropic(api_key=self._api_key))
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: client.messages.create(
+                    model=HAIKU_MODEL,
+                    max_tokens=500,
+                    response_model=SentimentResult,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+            )
+            analysis = result.model_dump()
             analysis["model"] = HAIKU_MODEL
             analysis["available"] = True
             return analysis
-
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse Haiku response as JSON: {text[:200]}")
-            return {
-                "overall_sentiment": "unknown",
-                "raw_response": text[:500],
-                "available": True,
-                "parse_error": True,
-            }
         except Exception as e:
-            logger.error(f"Sentiment analysis error: {e}")
+            logger.error(f"API sentiment error: {e}")
             return {"error": str(e), "available": True}

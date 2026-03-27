@@ -8,6 +8,7 @@ academic paper search, citation analysis, knowledge management, and
 """
 
 import logging
+import os
 import time
 import mcp.types as types
 from typing import Dict, Any, List
@@ -103,26 +104,25 @@ async def get_prompt(
 # Tier 1: Always visible (~12 tools, ~3K tokens instead of ~8K)
 # These are the tools most likely to be needed in any session.
 _TIER1_TOOLS = [
-    search_tool, download_tool, read_tool,          # Core paper workflow
-    kb_tool, citations_tool,                         # Knowledge + citations
-    github_tool, hn_tool, reddit_tool,               # Top practitioner sources
-    tech_pulse_tool, evaluate_tool, deep_research_tool,  # CTO intelligence
-    suggest_tools_tool,                              # Meta: discover Tier 2
+    search_tool, download_tool, read_tool,           # Core paper workflow
+    kb_tool, citations_tool,                          # Knowledge + citations
+    github_tool, hn_tool, reddit_tool,                # Top practitioner sources
+    tech_pulse_tool, evaluate_tool, deep_research_tool, sentiment_tool,  # CTO intelligence
+    suggest_tools_tool,                               # Meta: discover Tier 2
 ]
 
 # Tier 2: Discoverable via `help` tool, but always callable
 _TIER2_TOOLS = [
-    semantic_search_tool, multi_search_tool,         # Advanced search
-    list_tool, read_paper_chunks_tool,               # Paper management
-    research_lineage_tool, compare_tool,             # Advanced analysis
+    semantic_search_tool, multi_search_tool,          # Advanced search
+    list_tool, read_paper_chunks_tool,                # Paper management
+    research_lineage_tool, compare_tool,              # Advanced analysis
     trend_analysis_tool, digest_tool,
-    kg_query_tool, memory_tool,                      # Knowledge graph + memory
-    hf_trending_tool, pwc_search_tool,               # Academic sources
+    kg_query_tool, memory_tool,                       # Knowledge graph + memory
+    hf_trending_tool, pwc_search_tool,                # Academic sources
     model_benchmarks_tool, venue_lookup_tool,
     patent_search_tool, export_tool,
-    community_tool, packages_tool,                   # More practitioner sources
+    community_tool, packages_tool,                    # More practitioner sources
     so_tool, web_tool, context7_tool,
-    sentiment_tool,                                  # Sentiment (usually via evaluate)
 ]
 
 _ALL_TOOLS = _TIER1_TOOLS + _TIER2_TOOLS
@@ -378,6 +378,16 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextCont
 
 async def main():
     """Run the server async context."""
+    # OpenTelemetry tracing via OpenLIT — opt-in via OPENLIT_ENDPOINT env var
+    _openlit_endpoint = os.environ.get("OPENLIT_ENDPOINT", "").strip()
+    if _openlit_endpoint:
+        try:
+            import openlit
+            openlit.init(otlp_endpoint=_openlit_endpoint, disable_batch=False)
+            logger.info(f"OpenLIT tracing enabled → {_openlit_endpoint}")
+        except Exception as _oe:
+            logger.warning(f"OpenLIT init failed (continuing without tracing): {_oe}")
+
     # Register ALL tools (Tier 1 + Tier 2) for semantic discovery via `help`
     # This ensures the `help` tool can recommend Tier 2 tools even though
     # they're not in list_tools() (progressive disclosure)

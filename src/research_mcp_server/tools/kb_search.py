@@ -8,13 +8,30 @@ import json
 import logging
 from typing import Any, Dict, List
 
+import bm25s
 import numpy as np
 import mcp.types as types
 
 from .semantic_search import _load_model, MODEL_NAME, BGE_QUERY_PREFIX
 from ..store.knowledge_base import KnowledgeBase
+from ..clients.query_rewriter import rewrite_query
 
 logger = logging.getLogger("research-mcp-server")
+
+# Lazy singleton cross-encoder for reranking
+_cross_encoder = None
+_CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+
+def _get_cross_encoder():
+    global _cross_encoder
+    if _cross_encoder is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            _cross_encoder = CrossEncoder(_CROSS_ENCODER_MODEL)
+        except Exception as e:
+            logger.warning(f"CrossEncoder unavailable: {e}")
+    return _cross_encoder
 
 kb_search_tool = types.Tool(
     name="kb_search",
@@ -90,6 +107,55 @@ def _apply_filters(
     return True
 
 
+def _bm25_search(
+    query: str,
+    papers: List[Dict[str, Any]],
+    *,
+    tags: List[str] | None,
+    categories: List[str] | None,
+    reading_status: str | None,
+    collection: str | None,
+    top_k: int,
+) -> List[tuple[Dict[str, Any], float]]:
+    """Run BM25 over a paper corpus and return (paper, score) pairs.
+
+    Uses title + abstract as the document text. Filters are applied
+    post-scoring so the BM25 index covers the full corpus.
+    """
+    if not papers:
+        return []
+
+    corpus_texts = [
+        f"{p.get('title', '')} {p.get('abstract', '') or ''}"
+        for p in papers
+    ]
+    try:
+        tokenized_corpus = bm25s.tokenize(corpus_texts, stopwords="en", show_progress=False)
+        retriever = bm25s.BM25()
+        retriever.index(tokenized_corpus)
+
+        tokenized_query = bm25s.tokenize([query], stopwords="en", show_progress=False)
+        k = min(len(papers), top_k)
+        results_idx, scores = retriever.retrieve(tokenized_query, k=k)
+    except Exception as e:
+        logger.warning(f"BM25 search failed: {e}")
+        return []
+
+    ranked: List[tuple[Dict[str, Any], float]] = []
+    for idx, score in zip(results_idx[0], scores[0]):
+        paper = papers[int(idx)]
+        if not _apply_filters(
+            paper, tags=tags, categories=categories, reading_status=reading_status
+        ):
+            continue
+        if collection:
+            if collection not in paper.get("collections", []):
+                continue
+        ranked.append((paper, float(score)))
+
+    return ranked
+
+
 async def handle_kb_search(
     arguments: Dict[str, Any],
 ) -> List[types.TextContent]:
@@ -119,17 +185,66 @@ async def handle_kb_search(
         kb = KnowledgeBase()
         model_note: str | None = None
 
+        # ── Query rewriting (hybrid only) ────────────────────────
+        # Generate 2-3 reformulations; all are used for BM25/keyword retrieval.
+        # Dense semantic search uses the original query only (embedding space is
+        # robust to phrasing — rewriting there adds noise, not signal).
+        queries = [query]
+        if mode == "hybrid":
+            try:
+                queries = await rewrite_query(query)
+            except Exception as _rw_err:
+                logger.debug(f"Query rewrite skipped: {_rw_err}")
+
+        # ── BM25 corpus (hybrid only — fetch all papers once) ───
+        # Run BM25 for each query reformulation, merge all ranked lists via RRF.
+        bm25_results: List[tuple[Dict[str, Any], float]] = []
+        all_papers_for_bm25: List[Dict[str, Any]] = []
+        if mode == "hybrid":
+            all_papers_for_bm25 = await kb.list_papers(limit=10000)
+            if all_papers_for_bm25:
+                # RRF-merge BM25 results from all query reformulations
+                bm25_rrf: Dict[str, Dict[str, Any]] = {}
+                for q in queries:
+                    ranked = _bm25_search(
+                        q,
+                        all_papers_for_bm25,
+                        tags=tags,
+                        categories=categories,
+                        reading_status=reading_status,
+                        collection=collection,
+                        top_k=max_results * 5,
+                    )
+                    for rank, (paper, _score) in enumerate(ranked, start=1):
+                        pid = paper["id"]
+                        contribution = 1.0 / (60 + rank)
+                        if pid in bm25_rrf:
+                            bm25_rrf[pid]["score"] += contribution
+                        else:
+                            bm25_rrf[pid] = {"paper": paper, "score": contribution}
+                bm25_results = [
+                    (entry["paper"], entry["score"])
+                    for entry in sorted(bm25_rrf.values(), key=lambda x: x["score"], reverse=True)
+                ]
+
         # ── Keyword search ──────────────────────────────────────
+        # Run SQL LIKE for each query reformulation, deduplicate by paper ID.
         keyword_results: List[Dict[str, Any]] = []
         if mode in ("keyword", "hybrid"):
-            keyword_results = await kb.list_papers(
-                query=query,
-                tags=tags,
-                categories=categories,
-                reading_status=reading_status,
-                collection=collection,
-                limit=max_results * 5,  # fetch larger pool for hybrid merging
-            )
+            seen_kw: set[str] = set()
+            for q in queries:
+                rows = await kb.list_papers(
+                    query=q,
+                    tags=tags,
+                    categories=categories,
+                    reading_status=reading_status,
+                    collection=collection,
+                    limit=max_results * 5,
+                )
+                for paper in rows:
+                    if paper["id"] not in seen_kw:
+                        seen_kw.add(paper["id"])
+                        keyword_results.append(paper)
 
         # ── Semantic search ─────────────────────────────────────
         semantic_results: List[tuple[Dict[str, Any], float]] = []
@@ -215,35 +330,33 @@ async def handle_kb_search(
                 final_papers.append(p)
 
         else:
-            # Hybrid — merge keyword and semantic results using
-            # Reciprocal Rank Fusion (RRF) with k=60
+            # Hybrid — merge keyword + BM25 + semantic via RRF (k=60)
             rrf_k = 60
             combined_scores: Dict[str, Dict[str, Any]] = {}
 
-            # RRF scores from keyword results (rank starts at 1)
-            for rank, paper in enumerate(keyword_results, start=1):
-                pid = paper["id"]
-                combined_scores[pid] = {
-                    "paper": paper,
-                    "rrf_score": 1.0 / (rrf_k + rank),
-                    "found_by": "keyword",
-                }
-
-            # RRF scores from semantic results (rank starts at 1)
-            for rank, (paper, _sim) in enumerate(semantic_results, start=1):
-                pid = paper["id"]
-                rrf_contribution = 1.0 / (rrf_k + rank)
+            def _rrf_add(pid: str, paper: Dict[str, Any], rank: int, source: str) -> None:
+                contribution = 1.0 / (rrf_k + rank)
                 if pid in combined_scores:
-                    combined_scores[pid]["rrf_score"] += rrf_contribution
-                    combined_scores[pid]["found_by"] = "both"
+                    combined_scores[pid]["rrf_score"] += contribution
+                    existing = combined_scores[pid]["found_by"]
+                    if source not in existing:
+                        combined_scores[pid]["found_by"] = f"{existing}+{source}"
                 else:
                     combined_scores[pid] = {
                         "paper": paper,
-                        "rrf_score": rrf_contribution,
-                        "found_by": "semantic",
+                        "rrf_score": contribution,
+                        "found_by": source,
                     }
 
-            # Sort by RRF score descending
+            for rank, paper in enumerate(keyword_results, start=1):
+                _rrf_add(paper["id"], paper, rank, "keyword")
+
+            for rank, (paper, _) in enumerate(bm25_results, start=1):
+                _rrf_add(paper["id"], paper, rank, "bm25")
+
+            for rank, (paper, _) in enumerate(semantic_results, start=1):
+                _rrf_add(paper["id"], paper, rank, "semantic")
+
             scored_papers: List[tuple[Dict[str, Any], float, str]] = [
                 (entry["paper"], entry["rrf_score"], entry["found_by"])
                 for entry in combined_scores.values()
@@ -258,6 +371,22 @@ async def handle_kb_search(
                 p["search_mode"] = "hybrid"
                 p["scoring"] = "reciprocal_rank_fusion"
                 final_papers.append(p)
+
+        # ── Cross-encoder reranking (hybrid mode, ≥2 results) ───
+        if mode == "hybrid" and len(final_papers) >= 2:
+            cross_encoder = _get_cross_encoder()
+            if cross_encoder is not None:
+                try:
+                    pairs = [
+                        (query, f"{p.get('title', '')} {p.get('abstract', '') or ''}")
+                        for p in final_papers
+                    ]
+                    ce_scores = cross_encoder.predict(pairs)
+                    for paper, score in zip(final_papers, ce_scores):
+                        paper["rerank_score"] = round(float(score), 4)
+                    final_papers.sort(key=lambda p: p.get("rerank_score", 0), reverse=True)
+                except Exception as e:
+                    logger.warning(f"Cross-encoder reranking failed: {e}")
 
         # ── Build response ──────────────────────────────────────
         response: Dict[str, Any] = {

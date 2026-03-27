@@ -113,16 +113,43 @@ def _fetch_arxiv_paper(source_id: str) -> Dict[str, Any]:
     raise ValueError(f"Paper not found on arXiv: {source_id}")
 
 
+def _build_embedding_text(paper: Dict[str, Any]) -> str:
+    """Build metadata-prefixed text for embedding.
+
+    Prefixing with structured metadata increases intra-document cohesion
+    and improves retrieval for filtered queries (by source, year, category).
+    """
+    title = paper.get("title", "")
+    abstract = paper.get("abstract", "") or ""
+    source = paper.get("source", "")
+    published_date = paper.get("published_date", "") or ""
+    year = published_date[:4] if published_date else ""
+    categories = paper.get("categories", []) or []
+    tags = paper.get("tags", []) or []
+
+    prefix_parts = []
+    if source:
+        prefix_parts.append(f"source:{source}")
+    if year:
+        prefix_parts.append(f"year:{year}")
+    if categories:
+        prefix_parts.append(f"category:{' '.join(categories[:2])}")
+    if tags:
+        prefix_parts.append(f"tags:{' '.join(tags)}")
+
+    prefix = " ".join(prefix_parts)
+    return f"{prefix} {title} {abstract}".strip()
+
+
 async def _generate_and_store_embedding(
-    kb: KnowledgeBase, paper_id: str, title: str, abstract: str | None
+    kb: KnowledgeBase, paper_id: str, paper: Dict[str, Any]
 ) -> bool:
-    """Generate and store an embedding for a paper.
+    """Generate and store a metadata-prefixed embedding for a paper.
 
     Args:
         kb: KnowledgeBase instance.
         paper_id: Paper ID in the KB.
-        title: Paper title.
-        abstract: Paper abstract (may be None).
+        paper: Full paper dict (title, abstract, source, published_date, categories, tags).
 
     Returns:
         True if embedding was generated and stored, False otherwise.
@@ -132,7 +159,7 @@ async def _generate_and_store_embedding(
         logger.warning("Embedding model unavailable, skipping embedding generation")
         return False
 
-    text = f"{title} {abstract or ''}"
+    text = _build_embedding_text(paper)
     embedding = model.encode([text], normalize_embeddings=True)[0]
     embedding_bytes = embedding.astype(np.float32).tobytes()
     await kb.save_embedding(paper_id, MODEL_NAME, embedding_bytes)
@@ -258,12 +285,7 @@ async def handle_kb_save(arguments: Dict[str, Any]) -> List[types.TextContent]:
         paper_id = await kb.save_paper(paper)
 
         # Generate and store embedding
-        embedding_stored = await _generate_and_store_embedding(
-            kb,
-            paper_id,
-            paper.get("title", ""),
-            paper.get("abstract"),
-        )
+        embedding_stored = await _generate_and_store_embedding(kb, paper_id, paper)
 
         # Handle collection
         collection_created = False
@@ -308,3 +330,50 @@ async def handle_kb_save(arguments: Dict[str, Any]) -> List[types.TextContent]:
     except Exception as e:
         logger.error(f"Unexpected error in kb_save: {e}")
         return [types.TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_kb_reindex(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    """Re-embed all KB papers with metadata-prefixed text.
+
+    Useful after upgrading the embedding scheme (e.g. adding metadata prefixes)
+    to bring existing papers in line with newly saved ones.
+
+    Args:
+        arguments: Unused. Re-indexes all papers unconditionally.
+
+    Returns:
+        List with a single TextContent containing reindex stats as JSON.
+    """
+    kb = KnowledgeBase()
+    model = _load_model()
+    if model is None:
+        return [types.TextContent(type="text", text="Error: Embedding model unavailable.")]
+
+    papers = await kb.list_papers(limit=10000)
+    succeeded = 0
+    failed = 0
+    skipped = 0
+
+    for paper in papers:
+        paper_id = paper.get("id")
+        if not paper_id:
+            skipped += 1
+            continue
+        try:
+            text = _build_embedding_text(paper)
+            embedding = model.encode([text], normalize_embeddings=True)[0]
+            embedding_bytes = embedding.astype(np.float32).tobytes()
+            await kb.save_embedding(paper_id, MODEL_NAME, embedding_bytes)
+            succeeded += 1
+        except Exception as e:
+            logger.warning(f"Re-index failed for {paper_id}: {e}")
+            failed += 1
+
+    result = {
+        "status": "completed",
+        "total": len(papers),
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+    }
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]

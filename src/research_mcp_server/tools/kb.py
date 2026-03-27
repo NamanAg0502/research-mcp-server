@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 import mcp.types as types
 
-from .kb_save import handle_kb_save
+from .kb_save import handle_kb_save, handle_kb_reindex
 from .kb_search import handle_kb_search
 from .kb_list import handle_kb_list
 from .kb_annotate import handle_kb_annotate
@@ -16,13 +16,13 @@ logger = logging.getLogger("research-mcp-server")
 
 kb_tool = types.Tool(
     name="kb",
-    description="Manage your local paper knowledge base. Actions: save, search, list, annotate, remove.",
+    description="Manage your local paper knowledge base. Actions: save, search, list, annotate, remove, re_index (re-embed all papers with updated metadata prefixes).",
     inputSchema={
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["save", "search", "list", "annotate", "remove"],
+                "enum": ["save", "search", "list", "annotate", "remove", "re_index"],
                 "description": "The operation to perform.",
             },
             # --- save ---
@@ -200,10 +200,12 @@ async def handle_kb(arguments: Dict[str, Any]) -> List[types.TextContent]:
         return await handle_kb_annotate(arguments)
     elif action == "remove":
         return await handle_kb_remove(arguments)
+    elif action == "re_index":
+        return await handle_kb_reindex(arguments)
     else:
         return [
             types.TextContent(
                 type="text",
-                text=f"Error: Unknown action '{action}'. Use: save, search, list, annotate, remove.",
+                text=f"Error: Unknown action '{action}'. Use: save, search, list, annotate, remove, re_index.",
             )
         ]

@@ -13,6 +13,16 @@ import asyncio
 from typing import Any, Dict, List
 
 import mcp.types as types
+from pydantic import BaseModel
+
+
+class EvidenceAssessment(BaseModel):
+    """Structured assessment of whether retrieved evidence covers the query."""
+    required_facts: List[str]   # key facets the query asks about
+    confirmed_facts: List[str]  # facets found in retrieved results
+    gaps: List[str]             # facets not yet covered
+    sufficient: bool            # True when gaps is empty or coverage ≥ threshold
+    sub_queries: List[str]      # targeted queries to fill the gaps
 
 logger = logging.getLogger("research-mcp-server")
 
@@ -158,6 +168,7 @@ async def handle_evaluate(arguments: Dict[str, Any]) -> List[types.TextContent]:
     from .hn_tools import handle_hn
     from .package_tools import handle_packages
     from .context7_tools import handle_context7
+    from .so_tools import handle_so
 
     items = arguments["items"]
     results: Dict[str, Any] = {"items": items}
@@ -165,11 +176,16 @@ async def handle_evaluate(arguments: Dict[str, Any]) -> List[types.TextContent]:
 
     async def safe_call(name, coro):
         try:
-            r = await coro
+            r = await asyncio.wait_for(coro, timeout=30.0)
             return json.loads(r[0].text)
+        except asyncio.TimeoutError:
+            errors.append(f"{name}: timed out after 30s")
+            return None
         except Exception as e:
             errors.append(f"{name}: {str(e)}")
             return None
+
+    vs_query = " vs ".join(items[:3])
 
     # 1. GitHub comparison (if repos provided)
     github_repos = arguments.get("github_repos")
@@ -201,22 +217,28 @@ async def handle_evaluate(arguments: Dict[str, Any]) -> List[types.TextContent]:
         if pkg_data:
             results["packages"] = pkg_data
 
-    # 4. Reddit discussions — search for comparison threads
-    vs_query = " vs ".join(items[:3])
-    reddit_data = await safe_call("reddit", handle_reddit({
-        "action": "search", "query": vs_query, "max_results": 5, "time_filter": "year",
-    }))
-    if reddit_data:
-        results["reddit_discussions"] = reddit_data
+    # Run Reddit, HN, SO, and docs in parallel
+    parallel_tasks = {
+        "reddit": safe_call("reddit", handle_reddit({
+            "action": "search", "query": vs_query, "max_results": 5, "time_filter": "year",
+        })),
+        "hackernews": safe_call("hackernews", handle_hn({
+            "action": "search", "query": vs_query, "max_results": 5, "time_range": "year",
+        })),
+        "stackoverflow_adoption": safe_call("stackoverflow_tags", handle_so({
+            "action": "tags", "tags": items[:5],
+        })),
+        "stackoverflow_discussions": safe_call("stackoverflow_search", handle_so({
+            "action": "search", "query": vs_query, "max_results": 5, "sort": "votes",
+        })),
+    }
+    parallel_names = list(parallel_tasks.keys())
+    parallel_results = await asyncio.gather(*parallel_tasks.values())
+    for name, data in zip(parallel_names, parallel_results):
+        if data is not None:
+            results[name] = data
 
-    # 5. HN discussions
-    hn_data = await safe_call("hackernews", handle_hn({
-        "action": "search", "query": vs_query, "max_results": 5, "time_range": "year",
-    }))
-    if hn_data:
-        results["hn_discussions"] = hn_data
-
-    # 6. Context7 live docs — fetch documentation for each technology
+    # Context7 live docs — sequential per item (API constraint)
     docs_results = []
     for item in items:
         doc_data = await safe_call(f"docs:{item}", handle_context7({
@@ -281,39 +303,48 @@ async def handle_sentiment(arguments: Dict[str, Any]) -> List[types.TextContent]
 
     discussions: Dict[str, Any] = {"topic": topic}
 
-    # Fetch Reddit threads
-    try:
-        reddit_result = await handle_reddit({
+    async def fetch_source(name: str, coro):
+        try:
+            r = await asyncio.wait_for(coro, timeout=30.0)
+            return name, json.loads(r[0].text)
+        except asyncio.TimeoutError:
+            errors.append(f"{name}: timed out after 30s")
+            return name, None
+        except Exception as e:
+            errors.append(f"{name}: {str(e)}")
+            return name, None
+
+    # Fetch Reddit and HN in parallel
+    results = await asyncio.gather(
+        fetch_source("reddit", handle_reddit({
             "action": "search",
             "query": topic,
             "sort": "relevance",
             "time_filter": time_range,
             "max_results": max_threads,
-        })
-        reddit_data = json.loads(reddit_result[0].text)
-        discussions["reddit"] = {
-            "total_posts": reddit_data.get("total", 0),
-            "posts": reddit_data.get("posts", []),
-        }
-    except Exception as e:
-        errors.append(f"reddit: {str(e)}")
-
-    # Fetch HN threads
-    try:
-        hn_result = await handle_hn({
+        })),
+        fetch_source("hackernews", handle_hn({
             "action": "search",
             "query": topic,
             "sort": "relevance",
-            "time_range": time_range if time_range != "month" else "year",  # HN has different ranges
+            "time_range": time_range if time_range != "month" else "year",
             "max_results": max_threads,
-        })
-        hn_data = json.loads(hn_result[0].text)
-        discussions["hackernews"] = {
-            "total_stories": hn_data.get("total", 0),
-            "stories": hn_data.get("stories", []),
-        }
-    except Exception as e:
-        errors.append(f"hackernews: {str(e)}")
+        })),
+    )
+
+    for name, data in results:
+        if data is None:
+            continue
+        if name == "reddit":
+            discussions["reddit"] = {
+                "total_posts": data.get("total", 0),
+                "posts": data.get("posts", []),
+            }
+        elif name == "hackernews":
+            discussions["hackernews"] = {
+                "total_stories": data.get("total", 0),
+                "stories": data.get("stories", []),
+            }
 
     # Build summary metrics
     reddit_posts = discussions.get("reddit", {}).get("posts", [])
@@ -372,7 +403,7 @@ async def handle_sentiment(arguments: Dict[str, Any]) -> List[types.TextContent]
 
 deep_research_tool = types.Tool(
     name="deep_research",
-    description="Comprehensive multi-source research — arXiv papers + GitHub + HN + Reddit + Dev.to + packages.",
+    description="Comprehensive multi-source research — arXiv + GitHub + HN + Reddit + Dev.to + packages. Includes evidence sufficiency gate for gap-fill.",
     inputSchema={
         "type": "object",
         "required": ["topic"],
@@ -394,6 +425,99 @@ deep_research_tool = types.Tool(
         },
     },
 )
+
+
+async def _assess_evidence(
+    topic: str,
+    results: Dict[str, Any],
+) -> EvidenceAssessment | None:
+    """Run a lightweight LLM evidence sufficiency check.
+
+    Returns None if LLM is unavailable (graceful degradation).
+    """
+    import shutil, os
+    cli = shutil.which("claude")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+    if not cli and not api_key:
+        return None
+
+    # Summarize what was retrieved
+    sources_summary = []
+    for source, data in results.items():
+        if source in ("topic", "search_query", "sources_queried", "sources_succeeded", "errors"):
+            continue
+        if isinstance(data, dict):
+            count = data.get("total", data.get("count", len(data.get("papers", data.get("repos", data.get("stories", data.get("posts", [])))))))
+            sources_summary.append(f"{source}: {count} results")
+        elif isinstance(data, list):
+            sources_summary.append(f"{source}: {len(data)} results")
+
+    prompt = f"""You are assessing whether research results sufficiently cover a query.
+
+Query: "{topic}"
+Retrieved so far: {', '.join(sources_summary) if sources_summary else 'nothing yet'}
+
+Return a JSON object:
+{{
+  "required_facts": ["list of 2-4 key aspects the query asks about"],
+  "confirmed_facts": ["which of those are likely covered by the results above"],
+  "gaps": ["which aspects are missing or underrepresented"],
+  "sufficient": true/false,
+  "sub_queries": ["1-2 targeted queries to fill the gaps, if any"]
+}}
+
+Rules: Be concise. If results look adequate, set sufficient=true and sub_queries=[].
+Return raw JSON only, no markdown."""
+
+    try:
+        if cli:
+            import asyncio
+            proc = await asyncio.create_subprocess_exec(
+                cli, "-p", prompt,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+            text = stdout.decode().strip()
+        else:
+            try:
+                import instructor
+                from anthropic import Anthropic
+
+                client = instructor.from_anthropic(Anthropic(api_key=api_key))
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=400,
+                        response_model=EvidenceAssessment,
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                )
+                return result
+            except Exception:
+                import httpx
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.post(
+                        "https://api.anthropic.com/v1/messages",
+                        json={"model": "claude-haiku-4-5-20251001", "max_tokens": 400,
+                              "messages": [{"role": "user", "content": prompt}]},
+                        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                                 "content-type": "application/json"},
+                    )
+                    resp.raise_for_status()
+                    text = resp.json().get("content", [{}])[0].get("text", "")
+
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        data = json.loads(text)
+        return EvidenceAssessment(**data)
+
+    except Exception as e:
+        logger.debug(f"Evidence assessment skipped: {e}")
+        return None
 
 
 def _simplify_query(topic: str, max_words: int = 5) -> str:
@@ -421,9 +545,17 @@ async def handle_deep_research(arguments: Dict[str, Any]) -> List[types.TextCont
     from .community_tools import handle_community
     from .package_tools import handle_packages
     from .context7_tools import handle_context7
+    from .so_tools import handle_so
+    from .web_tools import handle_web
 
     topic = arguments["topic"]
-    short_query = _simplify_query(topic)  # Simplified for APIs that choke on long queries
+    # Try LLM-based rewriting; fall back to heuristic truncation
+    try:
+        from ..clients.query_rewriter import rewrite_query
+        query_variants = await rewrite_query(topic)
+        short_query = query_variants[1] if len(query_variants) > 1 else _simplify_query(topic)
+    except Exception:
+        short_query = _simplify_query(topic)
     max_per = arguments.get("max_per_source", 5)
     include_packages = arguments.get("include_packages", True)
     results: Dict[str, Any] = {"topic": topic, "search_query": short_query}
@@ -431,15 +563,18 @@ async def handle_deep_research(arguments: Dict[str, Any]) -> List[types.TextCont
 
     async def safe_call(name, coro):
         try:
-            r = await coro
+            r = await asyncio.wait_for(coro, timeout=30.0)
             return json.loads(r[0].text)
+        except asyncio.TimeoutError:
+            errors.append(f"{name}: timed out after 30s")
+            return None
         except Exception as e:
             errors.append(f"{name}: {str(e)}")
             return None
 
     # Run all sources in parallel
     # arXiv gets the full topic (handles long queries well)
-    # GitHub/HN/Reddit/community get the simplified query
+    # GitHub/HN/Reddit/community/SO get the simplified query
     tasks = {
         "arxiv": safe_call("arxiv", handle_search({
             "query": topic, "max_results": max_per, "sort_by": "relevance",
@@ -456,7 +591,9 @@ async def handle_deep_research(arguments: Dict[str, Any]) -> List[types.TextCont
         "community": safe_call("community", handle_community({
             "action": "search", "query": short_query, "max_results": max_per,
         })),
-        # Context7: look for library/framework docs related to the topic
+        "stackoverflow": safe_call("stackoverflow", handle_so({
+            "action": "search", "query": short_query, "max_results": max_per, "sort": "votes",
+        })),
         "documentation": safe_call("context7", handle_context7({
             "action": "lookup", "library": short_query, "query": topic,
         })),
@@ -476,10 +613,68 @@ async def handle_deep_research(arguments: Dict[str, Any]) -> List[types.TextCont
         if data is not None:
             results[name] = data
 
+    # Fetch top HN story URLs to get full article content
+    hn_stories = results.get("hackernews", {}).get("stories", [])
+    urls_to_fetch = [
+        s["url"] for s in hn_stories
+        if s.get("url") and s["url"].startswith("http")
+    ][:2]  # top 2 external links only
+
+    if urls_to_fetch:
+        web_pages = await asyncio.gather(*[
+            safe_call(f"web:{url}", handle_web({
+                "url": url, "extract": "article", "max_length": 3000,
+            }))
+            for url in urls_to_fetch
+        ])
+        web_results = [
+            {"url": url, **page}
+            for url, page in zip(urls_to_fetch, web_pages)
+            if page
+        ]
+        if web_results:
+            results["web_articles"] = web_results
+
     if errors:
         results["errors"] = errors
 
     results["sources_queried"] = len(task_names)
     results["sources_succeeded"] = len(task_names) - len(errors)
+
+    # ── Evidence sufficiency gate (FAIR-RAG SEA pattern) ────────
+    # Assess whether results cover the key facets of the query.
+    # If gaps found, run a second targeted pass (max 1 retry).
+    assessment = await _assess_evidence(topic, results)
+    if assessment and not assessment.sufficient and assessment.sub_queries:
+        logger.info(f"Evidence gaps detected: {assessment.gaps}. Running gap-fill pass.")
+        gap_results: Dict[str, Any] = {}
+        gap_errors: List[str] = []
+
+        async def gap_call(name: str, coro):
+            try:
+                r = await asyncio.wait_for(coro, timeout=30.0)
+                return json.loads(r[0].text)
+            except Exception as e:
+                gap_errors.append(f"{name}: {str(e)}")
+                return None
+
+        gap_tasks = {}
+        for i, sub_q in enumerate(assessment.sub_queries[:2]):
+            gap_tasks[f"gap_arxiv_{i}"] = gap_call(f"gap_arxiv_{i}", handle_search({
+                "query": sub_q, "max_results": 3, "sort_by": "relevance",
+            }))
+            gap_tasks[f"gap_hn_{i}"] = gap_call(f"gap_hn_{i}", handle_hn({
+                "action": "search", "query": _simplify_query(sub_q), "max_results": 3,
+            }))
+
+        gap_task_names = list(gap_tasks.keys())
+        gap_task_results = await asyncio.gather(*gap_tasks.values())
+        for name, data in zip(gap_task_names, gap_task_results):
+            if data is not None:
+                gap_results[name] = data
+
+        if gap_results:
+            results["gap_fill"] = gap_results
+        results["evidence_assessment"] = assessment.model_dump()
 
     return [types.TextContent(type="text", text=json.dumps(results, indent=2))]

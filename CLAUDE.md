@@ -304,3 +304,4 @@ Every external API call goes through a per-source rate limiter. Add `await xxx_l
 - Stale `tool_index.pkl` after renaming tools — delete from `~/.arxiv-papers/`
 - Forgetting to restart MCP server after adding new tools (Claude Code won't see them)
 - Tool descriptions over 150 chars — keep concise, lead with use-case
+- Running `uv sync` alone after adding deps — always follow with `uv pip install -e .` to restore editable entrypoints (`arxiv-mcp-server`, `research-mcp-server`). `uv sync` removes them; `uv pip install -e .` puts them back.
